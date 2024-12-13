@@ -1,0 +1,54 @@
+#!/bin/sh
+
+. ./Common.sh
+
+(
+cat << EOF
+
+drop table if exists adsb_coverage_tmp;
+
+select z.gid, z.id, z.name, z.geom, st_area(geom, true) as surface, count(*) as overflights, count(*) / st_area(geom, true) as density
+into adsb_coverage_tmp
+from zones z, overfly o
+where z.gid = o.zone_id
+group by z.gid, z.id, z.name, z.geom;
+
+alter table adsb_coverage_tmp add column intensity numeric;
+
+update adsb_coverage_tmp set intensity = (100.0 * density) / (select max(density) from adsb_coverage_tmp);
+
+drop table if exists adsb_coverage;
+drop sequence if exists adsb_coverage_id;
+create sequence adsb_coverage_id;
+
+select
+   nextval( 'adsb_coverage_id' ) as gid,
+   id,
+   name, 
+   geom,
+   surface,
+   overflights, 
+   density,
+   intensity
+into adsb_coverage
+from adsb_coverage_tmp
+order by intensity;
+
+
+alter table adsb_coverage add column rank numeric;
+
+update adsb_coverage set rank = .5 + ( 9 * gid / (currval( 'adsb_coverage_id' ) + 1))::int;
+
+
+alter table adsb_coverage add primary key ( gid );
+
+create index on adsb_coverage using gist (geom);
+
+EOF
+) | psql -t 
+
+pg_dump -t adsb_coverage  --no-owner --no-privileges --if-exists --clean > adsb_coverage.sql
+
+
+cat adsb_coverage.sql | ssh 192.168.1.137 "psql -h 127.0.0.1 cadastre"
+
