@@ -1,0 +1,11 @@
+#!/bin/sh
+
+. ./Common.sh
+
+(
+cat << EOF
+
+select o.*, z.name from last_overfly o, zones z where o.zone_id = z.gid order by id, start_time;
+
+EOF
+) | psql
