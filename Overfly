@@ -1,0 +1,36 @@
+#!/bin/sh
+
+. ./Common.sh
+
+ZIDS=$1
+
+(
+cat << EOF
+
+drop table if exists stats;
+
+select
+   min(o.start_time)::date as day,
+   o.id as Identifiant,
+   last_value(c.callsign) over w as callsign,
+   z.id as Zone, z.name AS Nom_zone,
+   min(o.start_time) as debut, sum(o.end_time - o.start_time) as duree, min(min_alt) as min_alt, max(max_alt) as max_alt, min(min_gspeed) as min_gspeed, max(max_gspeed) as max_gspeed
+into stats
+from overfly o
+left join zones z on o.zone_id = z.gid 
+left join callsigns c on c.id = o.id and ((o.start_time >= c.first_seen and o.start_time <= c.last_seen) or (o.end_time >= c.first_seen and o.end_time <= c.last_seen))
+where z.id ilike any( array[ $ZIDS ] )
+group by o.id, c.callsign, z.id, z.name, c.last_seen, c.first_seen
+window w as (partition by c.callsign order by (c.last_seen - c.first_seen) range between unbounded preceding and unbounded following ) 
+order by min(o.start_time);
+
+select * from stats;
+
+select Zone, Nom_zone, day, count(*) as nombre, sum(duree) as duree_totale, min(min_alt) as min_alt, max(max_alt) as max_alt, min(min_gspeed) as min_gspeed, max(max_gspeed) as max_gspeed
+from stats
+group by Zone, Nom_zone,day
+order by Zone, day;
+
+
+EOF
+) | psql | sed 's/{NULL}/      /g'
