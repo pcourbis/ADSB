@@ -1,0 +1,10 @@
+All			Liste de tous les vols
+Common.sh		Definitions
+Coverage		Calcul de la carte de couverture
+InitDb			Création de la base
+Planes_full		Inportation des données
+adsb_coverage.sql	Carte de couverture
+sample_zones.sql	Liste des zones (communes & d�partements français)
+
+
+Lancer simplement Planes_full les données sont intégrées par trigger
