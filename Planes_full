@@ -1,0 +1,25 @@
+#!/bin/sh
+
+. ./Common.sh
+
+# set a buffer for spcat
+
+LINESIZE=100		# mean size of a message (actually ~85)
+MSGPERSECOND=1000	# Peak rate 1000 messages / second
+BUFFERSIZE=600		# 10 minutes
+
+export BUF=`expr $BUFFERSIZE \* $MSGPERSECOND \* $LINESIZE`
+
+while true
+do
+   echo "`date` Start capture"
+
+   socat -b $BUF -s TCP-CONNECT:$DUMP1090_HOST:$DUMP1090_PORT - | 
+      dos2unix |
+      #tee debug_plane_full |
+      tr -d ' ' |
+      sed "s/,/', '/g " |
+      sed "s/.*/insert into import values ( nextval('import_gid_seq'::regclass), '&' );/" |
+      sed "s/''/NULL/g " |
+      psql -t > /dev/null
+done
