@@ -1,0 +1,394 @@
+#!/bin/sh
+
+. ./Common.sh
+
+dropdb $PGDATABASE
+createdb $PGDATABASE
+
+echo "CREATE EXTENSION postgis;" | psql
+echo "drop table if exists zones;" | psql
+cat $ZONEFILE | psql
+
+
+(
+cat << EOF
+
+drop table if exists zones_orig;
+alter table zones rename to zones_orig;
+
+drop sequence if exists zones_gid_seq;
+create sequence zones_gid_seq as bigint;
+
+drop table if exists zones;
+create table zones
+(
+   gid	bigint,
+   id character varying(5),
+   name character varying(80),
+   geom geometry(MultiPolygon,4326)
+);
+
+ALTER TABLE ONLY zones ADD CONSTRAINT zone_prim_key PRIMARY KEY (gid);
+
+create index on zones ( id );
+create index on zones ( name );
+CREATE INDEX ON zones USING gist (geom);
+
+insert into zones ( select nextval( 'zones_gid_seq' ), id, name, geom from zones_orig );
+
+drop table if exists import;
+drop sequence if exists import_gid_seq;
+
+create sequence import_gid_seq as bigint;
+
+create table import
+(
+   gid	       bigint default nextval('import_gid_seq'::regclass),
+   msg         varchar default null,
+   type1       varchar default null,
+   type2       varchar default null,
+   type3       varchar default null,
+   id          varchar default null,
+   field_06    varchar default null,
+   gen_date    varchar default null,
+   gen_time    varchar default null,
+   field_09    varchar default null,
+   field_10    varchar default null,
+   callsign    varchar default null,
+   altitude    varchar default null,
+   groundspeed varchar default null,
+   track       varchar default null,
+   lat         varchar default null,
+   long        varchar default null,
+   vrate       varchar default null,
+   squawk      varchar default null,
+   alert       varchar default null,
+   emergency   varchar default null,
+   spi         varchar default null,
+   isonground  varchar default null
+);
+
+create index on import ( id, gid );
+
+select * into states from import where 1=2;
+select * into last_states from import where 1=2;
+
+drop table if exists last_overfly;
+
+drop sequence if exists overfly_seq;
+
+create sequence overfly_seq as bigint;
+
+drop table if exists overfly;
+
+create table overfly
+(
+   gid	      bigint,
+   id         varchar,
+   zone_id    bigint,
+   start_time timestamp,
+   end_time   timestamp,
+   min_alt    int,
+   max_alt    int,
+   min_gspeed int,
+   max_gspeed int
+);
+
+select *, 0::bigint as orig_gid, 'f'::boolean as updated into last_overfly from overfly where 1=2;
+
+drop function if exists Nullify;
+
+create or replace function Nullify( IN serial bigint, string varchar )
+returns varchar
+language plpgsql
+as
+\$\$
+begin
+return case when string is null then null else to_char( serial, '00000000000000000000') || '-' || string end;
+end;
+\$\$
+immutable;
+
+drop table if exists callsigns;
+drop sequence if exists callsigns_seq;
+create sequence callsigns_seq as bigint;
+
+
+create table callsigns
+(
+   gid		bigint,
+   id		varchar,
+   callsign	varchar,
+   first_seen	timestamp,
+   last_seen	timestamp
+);
+
+
+create or replace function ImportData()
+RETURNS trigger as
+\$\$
+begin
+
+-- Immediatly reset counter
+
+update import_counter set counter=0, lastrun=clock_timestamp();
+
+drop table if exists states;
+
+-- Cleanup import data
+
+delete from import where gen_date NOT SIMILAR TO '[0-9]{4}/[0-9][0-9]/[0-9][0-9]' or gen_time NOT SIMILAR TO '[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]';
+
+-- Add last recent known positions
+
+insert into import
+   (
+      select
+         *
+      from
+         last_states
+      where
+         (gen_date || ' ' || gen_time)::timestamp
+	 >=
+	 (
+	    select min(stamp)
+	    from 
+	    (
+	       select min((gen_date || ' ' || gen_time)::timestamp) as stamp from import
+	       union
+	       select now()
+	    ) sub
+	 ) - interval '10 minutes' -- '$PLANE_TTL'
+   );
+
+
+-- Do a drop down to fill values within the import data
+create table states
+as
+select
+   gid, msg, type1, type2, type3, id, field_06, gen_date, gen_time, field_09, field_10,
+   substring(max( Nullify( gid, callsign    )) over w, 23 ) as callsign,
+   substring(max( Nullify( gid, altitude    )) over w, 23 ) as altitude,
+   substring(max( Nullify( gid, groundspeed )) over w, 23 ) as groundspeed,
+   substring(max( Nullify( gid, track       )) over w, 23 ) as track,
+   substring(max( Nullify( gid, lat         )) over w, 23 ) as lat,
+   substring(max( Nullify( gid, long        )) over w, 23 ) as long,
+   substring(max( Nullify( gid, vrate       )) over w, 23 ) as vrate,
+   substring(max( Nullify( gid, squawk      )) over w, 23 ) as squawk,
+   substring(max( Nullify( gid, alert       )) over w, 23 ) as alert,
+   substring(max( Nullify( gid, emergency   )) over w, 23 ) as emergency,
+   substring(max( Nullify( gid, spi         )) over w, 23 ) as spi,
+   substring(max( Nullify( gid, isonground  )) over w, 23 ) as isonground
+from
+   import
+window w as ( partition by id order by gid range between unbounded preceding and current row )
+order by gid
+;
+
+
+-- Keep last kown states for next iteration
+
+drop table if exists last_states;
+
+create table last_states
+as
+select distinct
+   last_value( gid         ) over w as gid,
+   last_value( msg         ) over w as msg,
+   last_value( type1       ) over w as type1,
+   last_value( type2       ) over w as type2,
+   last_value( type3       ) over w as type3,
+   id,
+   last_value( field_06    ) over w as field_06,
+   last_value( gen_date    ) over w as gen_date,
+   last_value( gen_time    ) over w as gen_time,
+   last_value( field_09    ) over w as field_09,
+   last_value( field_10    ) over w as field_10,
+   last_value( callsign    ) over w as callsign,
+   last_value( altitude    ) over w as altitude,
+   last_value( groundspeed ) over w as groundspeed,
+   last_value( track       ) over w as track,
+   last_value( lat         ) over w as lat,
+   last_value( long        ) over w as long,
+   last_value( vrate       ) over w as vrate,
+   last_value( squawk      ) over w as squawk,
+   last_value( alert       ) over w as alert,
+   last_value( emergency   ) over w as emergency,
+   last_value( spi         ) over w as spi,
+   last_value( isonground  ) over w as isonground
+from states
+window w as ( partition by id order by gid range between unbounded preceding and unbounded following )
+;
+
+-- drop reworked data
+-- truncate table import;
+delete from import;
+
+drop table if exists current_pos;
+
+create table current_pos
+as
+select 
+   id,
+   lat::real, long::real,
+   min((gen_date || ' ' || gen_time)::timestamp) start_time,
+   max((gen_date || ' ' || gen_time)::timestamp) end_time,
+   min(altitude::int) as min_alt, max(altitude::int) as max_alt,
+   min(groundspeed::int) as min_gspeed, max(groundspeed::int) as max_gspeed
+from
+   states
+where
+   long is not null and lat is not null
+group by 1,2,3;
+
+drop table if exists current_overfly;
+
+create table current_overfly
+as
+select
+   nextval( 'overfly_seq') as gid, 
+   p.id, z.gid as zone_id,
+   min(start_time) start_time, max(end_time) end_time, 
+   min(min_alt) as min_alt, max(max_alt) as max_alt,
+   min(min_gspeed) as min_gspeed, max(max_gspeed) as max_gspeed,
+   -1 as orig_gid
+from
+   current_pos p, zones z
+where
+   st_intersects( geom, ST_SetSRID(st_makepoint( p.long, p.lat ), 4326))
+group by 2,3,10;
+
+update current_overfly set orig_gid = gid;
+
+-- Update last overfly
+
+update last_overfly set updated = 'f';
+
+update
+   last_overfly
+set
+   updated = 't', gid = current_overfly.gid, end_time = current_overfly.end_time,
+   min_alt = least( current_overfly.min_alt, current_overfly.min_alt),
+   max_alt = greatest( current_overfly.max_alt, current_overfly.max_alt),
+   min_gspeed = least( current_overfly.min_gspeed, current_overfly.min_gspeed),
+   max_gspeed = greatest( current_overfly.max_gspeed, current_overfly.max_gspeed)
+from current_overfly
+where last_overfly.id = current_overfly.id and last_overfly.zone_id = current_overfly.zone_id;
+
+-- delete non updated rows
+
+delete from last_overfly where updated = 'f';
+
+-- delete new rows incorporated into updated data and insert them in current_overfly
+
+delete from current_overfly using last_overfly where current_overfly.gid = last_overfly.gid;
+insert into current_overfly ( select gid, id, zone_id, start_time, end_time, min_alt, max_alt, min_gspeed, max_gspeed, orig_gid from last_overfly );
+
+-- Create next last_overfly
+
+-- drop table if exists last_current_overfly;
+
+create table last_current_overfly
+as
+select
+   max(gid) as gid,
+   id,
+   zone_id,
+   min(start_time) as start_time,
+   max(end_time) as end_time,
+   min(min_alt) as min_alt,
+   max(max_alt) as max_alt,
+   min(min_gspeed) as min_gspeed,
+   max(max_gspeed) as max_gspeed,
+   'f'::boolean as updated,
+   max(gid) as orig_gid
+from
+   current_overfly
+where
+   (id, end_time) in (select id, max(end_time) from current_overfly group by 1)
+group by 2,3,10;
+
+-- Insert new overfly
+
+delete from overfly using current_overfly where overfly.gid = current_overfly.orig_gid;
+insert into overfly ( select gid, id, zone_id, start_time, end_time, min_alt, max_alt, min_gspeed, max_gspeed from current_overfly );
+
+-- Rotate new last_overfly from last_current_overfly to last_overfly
+
+update last_current_overfly set orig_gid = gid;
+drop table if exists last_overfly;
+alter table last_current_overfly rename to last_overfly;
+
+
+-- Register callsigns
+
+drop table if exists new_callsigns;
+
+create table new_callsigns
+as
+select
+   -1 as gid,
+   id,
+   callsign,
+   min((gen_date || ' ' || gen_time)::timestamp) start_time,
+   max((gen_date || ' ' || gen_time)::timestamp) end_time
+from
+   states
+where
+   callsign is not null
+group by 1,2,3;
+
+update new_callsigns set gid = nextval( 'callsigns_seq' );
+
+insert into new_callsigns ( select * from callsigns );
+
+truncate table callsigns;
+
+insert into callsigns
+(
+   select distinct
+      max(gid) over w as gid,
+      id,
+      last_value(callsign) over w as callsign,
+      min(start_time) over w as start_time,
+      max(end_time) over w as end_time
+   from
+      new_callsigns
+   window w as ( partition by id, callsign order by gid range between unbounded preceding and unbounded following)
+);
+
+return new;
+
+end;
+\$\$
+LANGUAGE plpgsql VOLATILE;
+
+drop table if exists import_counter;
+select count(*) as counter, now() as lastrun into import_counter from import;
+
+CREATE OR REPLACE FUNCTION IncrementCounter()
+  RETURNS trigger AS
+\$\$
+begin
+update import_counter set counter = counter + 1;
+return new;
+end;
+\$\$
+LANGUAGE plpgsql VOLATILE;
+
+create constraint trigger UpdateCounter
+after insert on import
+INITIALLY IMMEDIATE
+for each row
+execute function IncrementCounter() ;
+
+create constraint trigger HandleImport
+after update on import_counter
+INITIALLY IMMEDIATE for each row
+when (NEW.counter >= $MAXBUF or (now() - NEW.lastrun) > interval '$MINRUN' )
+execute function ImportData() ;
+
+
+EOF
+) |psql -t 
+
