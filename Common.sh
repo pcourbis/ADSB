@@ -12,10 +12,5 @@ export ZONEFILE=sample_zones.sql
 
 # Receiver position for distance statistics
 
-LAT=48.907487473664766
-LONG=2.115291739856805
-
-# Got from GPS :
-
-LAT=48.9074736 
-LONG=2.1151533
+LAT=48.1
+LONG=2.9
