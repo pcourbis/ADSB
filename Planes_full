@@ -17,7 +17,7 @@ do
    socat -b $BUF -s TCP-CONNECT:$DUMP1090_HOST:$DUMP1090_PORT - | 
       dos2unix |
       #tee debug_plane_full |
-      tr -d ' ' |
+      tr -d " '" |
       sed "s/,/', '/g " |
       sed "s/.*/insert into import values ( nextval('import_gid_seq'::regclass), '&' );/" |
       sed "s/''/NULL/g " |
