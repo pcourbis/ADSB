@@ -21,6 +21,5 @@ do
       sed "s/,/', '/g " |
       sed "s/.*/insert into import values ( nextval('import_gid_seq'::regclass), '&' );/" |
       sed "s/''/NULL/g " |
-      tr -d "'" |
       psql -t > /dev/null
 done
